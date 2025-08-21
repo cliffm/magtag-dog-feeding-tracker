@@ -23,6 +23,8 @@ last_refresh = None
 
 # URL for time API
 TIME_URL = "http://worldtimeapi.org/api/timezone/America/New_York"
+# URL for dog feeding status
+DOG_FEED_STATUS_URL = "http://ha-server2:1880/dog-feed-status"
 
 # bitmap locations
 BACKGROUND = "/bmps/background.bmp"
@@ -36,6 +38,9 @@ morning_sprite = None
 morning_sprite_label = None
 evening_sprite = None
 evening_sprite_label = None
+
+# global requests session
+requests = None
 
 # neopixel colors
 RED = (150, 0, 0)  # less intense red
@@ -53,16 +58,18 @@ class TimeWindow():
 # bowl icon and palette
 bowl_icon, bowl_icon_pal = adafruit_imageload.load(BOWL_SPRITE)
 
-# mqtt topics
+# mqtt topics - now used as triggers only
 dog_fed_morning_topic = 'dog/fed/morning'
 dog_fed_evening_topic = 'dog/fed/evening'
 
 
 def set_device_time(pool):
     """connect to webservice, and get time information (JSON), and set device Real Time Clock"""
+    global requests
     try:
         # call webservice
-        requests = adafruit_requests.Session(pool, ssl.create_default_context())
+        if not requests:
+            requests = adafruit_requests.Session(pool, ssl.create_default_context())
         response = requests.get(TIME_URL)
 
         # parse JSON data
@@ -84,9 +91,88 @@ def set_device_time(pool):
 
         if rtc is not None:
             rtc.RTC().datetime = now
-    except:
-        print("There was an error")
+    except Exception as e:
+        print(f"Error setting device time: {e}")
         pass
+
+
+def fetch_dog_feed_status():
+    """Fetch dog feeding status from REST API"""
+    global requests
+    try:
+        if not requests:
+            return None
+
+        print("Fetching dog feed status from API...")
+        response = requests.get(DOG_FEED_STATUS_URL)
+
+        if response.status_code == 200:
+            data = json.loads(response.text)
+            return data.get('dog_feed_status', {})
+        else:
+            print(f"API returned status code: {response.status_code}")
+            return None
+
+    except Exception as e:
+        print(f"Error fetching dog feed status: {e}")
+        return None
+
+
+def update_display_from_status(status_data):
+    """Update the display based on the API response"""
+    global morning_sprite, morning_sprite_label
+    global evening_sprite, evening_sprite_label
+    global last_refresh
+
+    if not status_data:
+        print("No status data available")
+        return
+
+    morning_status = status_data.get('morning')
+    evening_status = status_data.get('evening')
+
+    # Update morning status
+    if morning_status:
+        pixels[3] = GREEN
+        morning_sprite[0] = 1
+        # Extract time from the status if it's a timestamp, otherwise use as-is
+        display_time = morning_status
+        if 'T' in morning_status:  # ISO format timestamp
+            try:
+                dt = datetime.datetime.fromisoformat(morning_status.replace('Z', '+00:00'))
+                display_time = dt.strftime('%H:%M')
+            except:
+                pass
+        morning_sprite_label.text = f"Fed at {display_time}"
+    else:
+        pixels[3] = RED
+        morning_sprite[0] = 0
+        morning_sprite_label.text = "Not fed"
+
+    # Update evening status
+    if evening_status:
+        pixels[0] = GREEN
+        evening_sprite[0] = 1
+        # Extract time from the status if it's a timestamp, otherwise use as-is
+        display_time = evening_status
+        if 'T' in evening_status:  # ISO format timestamp
+            try:
+                dt = datetime.datetime.fromisoformat(evening_status.replace('Z', '+00:00'))
+                display_time = dt.strftime('%H:%M')
+            except:
+                pass
+        evening_sprite_label.text = f"Fed at {display_time}"
+    else:
+        pixels[0] = RED
+        evening_sprite[0] = 0
+        evening_sprite_label.text = "Not fed"
+
+    # Refresh display with rate limiting
+    now = time.time()
+    if not last_refresh or now > last_refresh + 5:
+        board.DISPLAY.refresh()
+        last_refresh = time.time()
+        print("Display updated")
 
 
 def check_time_window():
@@ -161,8 +247,8 @@ def setup_mqtt_client(pool):
     # Connect callback handlers to mqtt_client
     mqtt_client.on_connect = connect
     mqtt_client.on_disconnect = disconnect
-    mqtt_client.add_topic_callback(dog_fed_morning_topic, dog_fed_morning)
-    mqtt_client.add_topic_callback(dog_fed_evening_topic, dog_fed_evening)
+    mqtt_client.add_topic_callback(dog_fed_morning_topic, dog_feeding_trigger)
+    mqtt_client.add_topic_callback(dog_fed_evening_topic, dog_feeding_trigger)
 
     return mqtt_client
 
@@ -184,54 +270,22 @@ def subscribe(mqtt_client, userdata, topic, granted_qos):
     print(f"Subscribed to {topic} with QOS level {granted_qos}")
 
 
-def dog_fed_morning(client, topic, message):
-    global morning_sprite, morning_sprite_label
-    global last_refresh
+def dog_feeding_trigger(client, topic, message):
+    """MQTT callback that triggers a REST API call to update status"""
+    print(f"Received trigger on {topic}: {message}")
 
-    if len(message) > 0:
-        print(f"{topic} called with {message}")
-        pixels[3] = GREEN
-        morning_sprite[0] = 1
-        morning_sprite_label.text = f"Fed at {message}"
+    # Fetch latest status from API
+    status_data = fetch_dog_feed_status()
+    if status_data:
+        update_display_from_status(status_data)
     else:
-        pixels[3] = RED
-        morning_sprite[0] = 0
-        morning_sprite_label.text = f"Not fed"
-
-    now = time.time()
-    if now <= last_refresh + 5:
-        time.sleep(5)
-
-    board.DISPLAY.refresh()
-    last_refresh = time.time()
-
-
-def dog_fed_evening(client, topic, message):
-    global evening_sprite, evening_sprite_label
-    global last_refresh
-
-    if len(message) > 0:
-        print(f"{topic} called with {message}")
-        pixels[0] = GREEN
-        evening_sprite[0] = 1
-        evening_sprite_label.text = f"Fed at {message}"
-    else:
-        pixels[0] = RED
-        evening_sprite[0] = 0
-        evening_sprite_label.text = f"Not fed"
-
-    now = time.time()
-    if now <= last_refresh + 5:
-        time.sleep(5)
-
-    board.DISPLAY.refresh()
-    last_refresh = time.time()
+        print("Failed to fetch status from API")
 
 
 def main():
     global morning_sprite, morning_sprite_label
     global evening_sprite, evening_sprite_label
-    global last_refresh
+    global last_refresh, requests
 
     print(f'Connecting to {secrets["ssid"]}')
     wifi.radio.connect(secrets["ssid"], secrets["password"])
@@ -240,10 +294,14 @@ def main():
     # Create a socket pool
     pool = socketpool.SocketPool(wifi.radio)
 
+    # Initialize requests session
+    requests = adafruit_requests.Session(pool, ssl.create_default_context())
+
     # set up default state for neopixels
     pixels[3] = RED
     pixels[0] = RED
 
+    # Set up display
     splash = displayio.Group(scale=1)
     bg_group = displayio.Group()
     position = (0, 0)
@@ -266,29 +324,52 @@ def main():
     board.DISPLAY.refresh()
     last_refresh = time.time()
 
+    # Set up MQTT client for triggers
     mqtt_client = setup_mqtt_client(pool)
 
     print(f"Attempting to connect to {mqtt_client.broker}")
     mqtt_client.connect()
 
+    # Initial status fetch
+    print("Fetching initial dog feed status...")
+    initial_status = fetch_dog_feed_status()
+    if initial_status:
+        update_display_from_status(initial_status)
+
     last_sync = None
+    last_status_fetch = None
+
     while True:
+        # Sync device time once an hour
         if not last_sync or (time.monotonic() - last_sync) > 3600:
-            # at start or once an hour
             print("Syncing device time")
             set_device_time(pool)
             last_sync = time.monotonic()
 
+        # Check if it's time to sleep
         check_time_window()
 
+        # Handle MQTT messages (triggers)
         try:
             mqtt_client.loop()
-        except:
-            mqtt_client.connect()
+        except Exception as e:
+            print(f"MQTT error: {e}")
+            try:
+                mqtt_client.connect()
+            except:
+                pass
+
+        # Periodic status fetch (every 5 minutes) as fallback
+        now = time.monotonic()
+        if not last_status_fetch or (now - last_status_fetch) > 300:  # 5 minutes
+            print("Periodic status fetch...")
+            status_data = fetch_dog_feed_status()
+            if status_data:
+                update_display_from_status(status_data)
+            last_status_fetch = now
 
         time.sleep(3)
 
 
 if __name__ == '__main__':
-    # TODO: Sprites
     main()
