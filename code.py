@@ -1,4 +1,3 @@
-"""CircuitPython Essentials NeoPixel example"""
 import errno
 
 import alarm  # for deep sleep
