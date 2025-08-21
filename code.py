@@ -20,6 +20,8 @@ from adafruit_display_text import label
 
 from secrets import secrets
 
+last_refresh = None
+
 # URL for time API
 TIME_URL = "http://worldtimeapi.org/api/timezone/America/New_York"
 
@@ -37,8 +39,9 @@ evening_sprite = None
 evening_sprite_label = None
 
 # neopixel colors
-RED = (150, 0, 0) # less intense red
-GREEN = (0, 150, 0) # less intense green
+RED = (150, 0, 0)  # less intense red
+GREEN = (0, 150, 0)  # less intense green
+
 
 # hours on a 24 hour clock
 class TimeWindow():
@@ -46,6 +49,7 @@ class TimeWindow():
     MORNING_END = 11
     EVENING_START = 16
     EVENING_END = 21
+
 
 # bowl icon and palette
 bowl_icon, bowl_icon_pal = adafruit_imageload.load(BOWL_SPRITE)
@@ -119,7 +123,7 @@ def check_time_window():
         alarm.exit_and_deep_sleep_until_alarms(time_alarm)
 
 
-def setup_panel(x_offset = 0):
+def setup_panel(x_offset=0):
     sprite = displayio.TileGrid(
         bowl_icon,
         pixel_shader=bowl_icon_pal,
@@ -183,6 +187,8 @@ def subscribe(mqtt_client, userdata, topic, granted_qos):
 
 def dog_fed_morning(client, topic, message):
     global morning_sprite, morning_sprite_label
+    global last_refresh
+
     if len(message) > 0:
         print(f"{topic} called with {message}")
         pixels[3] = GREEN
@@ -193,10 +199,18 @@ def dog_fed_morning(client, topic, message):
         morning_sprite[0] = 0
         morning_sprite_label.text = f"Not fed"
 
+    now = time.time()
+    if now <= last_refresh + 5:
+        time.sleep(5)
+
     board.DISPLAY.refresh()
+    last_refresh = time.time()
+
 
 def dog_fed_evening(client, topic, message):
     global evening_sprite, evening_sprite_label
+    global last_refresh
+
     if len(message) > 0:
         print(f"{topic} called with {message}")
         pixels[0] = GREEN
@@ -207,13 +221,19 @@ def dog_fed_evening(client, topic, message):
         evening_sprite[0] = 0
         evening_sprite_label.text = f"Not fed"
 
+    now = time.time()
+    if now <= last_refresh + 5:
+        time.sleep(5)
+
     board.DISPLAY.refresh()
+    last_refresh = time.time()
 
 
 def main():
     global morning_sprite, morning_sprite_label
     global evening_sprite, evening_sprite_label
-    
+    global last_refresh
+
     print(f'Connecting to {secrets["ssid"]}')
     wifi.radio.connect(secrets["ssid"], secrets["password"])
     print(f'Connected to {secrets["ssid"]}')
@@ -224,7 +244,6 @@ def main():
     # set up default state for neopixels
     pixels[3] = RED
     pixels[0] = RED
-
 
     splash = displayio.Group(scale=1)
     bg_group = displayio.Group()
@@ -245,6 +264,8 @@ def main():
     splash.append(evening_group)
 
     board.DISPLAY.show(splash)
+    board.DISPLAY.refresh()
+    last_refresh = time.time()
 
     mqtt_client = setup_mqtt_client(pool)
 
