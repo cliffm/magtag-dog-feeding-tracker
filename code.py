@@ -111,6 +111,9 @@ class DogFeedingTracker:
 
     def setup(self):
         """Initialize all components"""
+        # Show startup animation first
+        self.display.startup_animation()
+
         # Connect to WiFi
         if not self.network.connect_wifi():
             print("Failed to connect to WiFi, will retry after reset...")

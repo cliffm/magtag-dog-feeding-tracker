@@ -13,7 +13,7 @@ class Config:
     MORNING_START = 7
     MORNING_END = 11
     EVENING_START = 16
-    EVENING_END = 23  # Extended for testing (normally 21)
+    EVENING_END = 21
 
     # API endpoints
     TIME_URL = "http://worldtimeapi.org/api/timezone/America/New_York"

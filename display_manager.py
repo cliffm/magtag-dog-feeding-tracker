@@ -42,6 +42,42 @@ class DisplayManager:
         )
         print("Bowl sprites loaded successfully")
 
+    def startup_animation(self):
+        """Play a startup animation to indicate successful boot"""
+        print("Playing startup animation...")
+
+        # Save current state
+        original_brightness = self.pixels.brightness
+
+        # Quick green flash sequence
+        for i in range(3):
+            self.pixels.fill(Config.PIXEL_GREEN)
+            self.pixels.show()
+            time.sleep(0.2)
+            self.pixels.fill(Config.PIXEL_OFF)
+            self.pixels.show()
+            time.sleep(0.2)
+
+        # Chase animation around the 4 pixels
+        for _ in range(2):
+            for i in range(4):
+                self.pixels.fill(Config.PIXEL_OFF)
+                self.pixels[i] = Config.PIXEL_GREEN
+                self.pixels.show()
+                time.sleep(0.1)
+
+        # Final flash
+        self.pixels.fill(Config.PIXEL_GREEN)
+        self.pixels.show()
+        time.sleep(0.3)
+        self.pixels.fill(Config.PIXEL_OFF)
+        self.pixels.show()
+
+        # Restore brightness
+        self.pixels.brightness = original_brightness
+        time.sleep(0.5)
+        print("Startup animation complete")
+
     def setup(self):
         """Initialize the e-ink display"""
         print("Setting up display...")
