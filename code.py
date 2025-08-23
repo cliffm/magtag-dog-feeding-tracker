@@ -1,374 +1,793 @@
-import errno
+"""
+Dog Feeding Tracker for Adafruit MagTag
+CircuitPython 10.x compatible
+Tracks morning and evening dog feeding status with e-ink display
+"""
 
-import alarm  # for deep sleep
+import gc
 import json
 import ssl
 import time
+import alarm
 import board
-import rtc  # real time clock - set the time on the device
+import rtc
 import displayio
 import terminalio
 import socketpool
 import neopixel
 import wifi
+import microcontroller
 import adafruit_datetime as datetime
 import adafruit_minimqtt.adafruit_minimqtt as MQTT
 import adafruit_requests
-import adafruit_imageload
+try:
+    import adafruit_imageload
+    IMAGELOAD_AVAILABLE = True
+except (ImportError, ValueError) as e:
+    print(f"Warning: adafruit_imageload not available: {e}")
+    IMAGELOAD_AVAILABLE = False
 from adafruit_display_text import label
 
-from secrets import secrets
+# Import secrets from secrets.py file
+try:
+    from secrets import secrets
+except ImportError:
+    print("WiFi secrets not found in secrets.py")
+    raise
 
-last_refresh = None
+# Configuration class for all settings
+class Config:
+    """Configuration settings for the dog feeding tracker"""
 
-# URL for time API
-TIME_URL = "http://worldtimeapi.org/api/timezone/America/New_York"
-# URL for dog feeding status
-DOG_FEED_STATUS_URL = "http://ha-server2:1880/dog-feed-status"
-
-# bitmap locations
-BACKGROUND = "/bmps/background.bmp"
-BOWL_SPRITE = "/bmps/bowl_tile.bmp"
-
-# needs to be a global, so it's accessible from mqtt callbacks
-pixels = neopixel.NeoPixel(board.NEOPIXEL, 4, brightness=0.05)
-
-# globals for updating the status
-morning_sprite = None
-morning_sprite_label = None
-evening_sprite = None
-evening_sprite_label = None
-
-# global requests session
-requests = None
-
-# neopixel colors
-RED = (150, 0, 0)  # less intense red
-GREEN = (0, 150, 0)  # less intense green
-
-
-# hours on a 24 hour clock
-class TimeWindow():
+    # Time windows (24-hour format)
     MORNING_START = 7
     MORNING_END = 11
     EVENING_START = 16
-    EVENING_END = 21
+    EVENING_END = 23  # Extended for testing (was 21)
+
+    # API endpoints
+    TIME_URL = "http://worldtimeapi.org/api/timezone/America/New_York"
+    # Use IP address instead of hostname for local network
+    # Update this to your Home Assistant server's IP address
+    DOG_FEED_STATUS_URL = "http://192.168.1.85:1880/dog-feed-status"
+
+    # MQTT topics
+    MQTT_MORNING_TOPIC = 'dog/fed/morning'
+    MQTT_EVENING_TOPIC = 'dog/fed/evening'
+
+    # Refresh intervals (seconds)
+    TIME_SYNC_INTERVAL = 3600  # 1 hour
+    STATUS_FETCH_INTERVAL = 300  # 5 minutes
+    DISPLAY_REFRESH_MIN_INTERVAL = 5  # Minimum time between display refreshes
+    MQTT_LOOP_TIMEOUT = 0.5  # MQTT loop timeout
+
+    # Retry settings
+    MAX_RETRIES = 3
+    RETRY_DELAY = 2
+    CONNECTION_FAILURE_THRESHOLD = 5
+    HTTP_TIMEOUT = 5  # Reduced timeout for faster failures
+
+    # NeoPixel settings (MagTag has 4 NeoPixels)
+    PIXEL_BRIGHTNESS = 0.05
+    PIXEL_RED = (150, 0, 0)
+    PIXEL_GREEN = (0, 150, 0)
+    PIXEL_OFF = (0, 0, 0)
+
+    # NeoPixel positions for status indicators
+    MORNING_PIXEL = 3  # Top right
+    EVENING_PIXEL = 0  # Top left
+
+    # Display resources
+    BACKGROUND_BMP = "/images/background.bmp"
+    BOWL_SPRITE_BMP = "/images/bowl_tile.bmp"
+
+    # Display positioning
+    MORNING_X_OFFSET = 0
+    EVENING_X_OFFSET = 147
 
 
-# bowl icon and palette
-bowl_icon, bowl_icon_pal = adafruit_imageload.load(BOWL_SPRITE)
+class DogFeedingTracker:
+    """Main class for dog feeding tracker functionality"""
 
-# mqtt topics - now used as triggers only
-dog_fed_morning_topic = 'dog/fed/morning'
-dog_fed_evening_topic = 'dog/fed/evening'
+    def __init__(self):
+        """Initialize the tracker with default values"""
+        # Hardware components
+        self.pixels = neopixel.NeoPixel(
+            board.NEOPIXEL,
+            4,  # MagTag has 4 NeoPixels
+            brightness=Config.PIXEL_BRIGHTNESS,
+            auto_write=True  # CircuitPython 10 supports auto_write
+        )
 
+        # Display components
+        self.morning_sprite = None
+        self.morning_sprite_label = None
+        self.evening_sprite = None
+        self.evening_sprite_label = None
 
-def set_device_time(pool):
-    """connect to webservice, and get time information (JSON), and set device Real Time Clock"""
-    global requests
-    try:
-        # call webservice
-        if not requests:
-            requests = adafruit_requests.Session(pool, ssl.create_default_context())
-        response = requests.get(TIME_URL)
+        # Network components
+        self.requests = None
+        self.mqtt_client = None
+        self.pool = None
 
-        # parse JSON data
-        data = json.loads(response.text)
+        # Timing tracking
+        self.last_refresh = 0
+        self.last_sync = 0
+        self.last_status_fetch = 0
 
-        d = datetime.datetime.fromisoformat(data['datetime'])
-        day_of_year = data['day_of_year']
-        dst = data['dst']
-        now = time.struct_time((
-            d.year,
-            d.month,
-            d.day,
-            d.hour,
-            d.minute,
-            d.second,
-            d.weekday(),
-            day_of_year,
-            dst))
+        # Connection tracking
+        self.connection_failures = 0
+        self.mqtt_connected = False
 
-        if rtc is not None:
-            rtc.RTC().datetime = now
-    except Exception as e:
-        print(f"Error setting device time: {e}")
-        pass
+        # Load bowl icon sprite sheet if imageload is available
+        self.bowl_icon = None
+        self.bowl_icon_pal = None
 
-
-def fetch_dog_feed_status():
-    """Fetch dog feeding status from REST API"""
-    global requests
-    try:
-        if not requests:
-            return None
-
-        print("Fetching dog feed status from API...")
-        response = requests.get(DOG_FEED_STATUS_URL)
-
-        if response.status_code == 200:
-            data = json.loads(response.text)
-            return data.get('dog_feed_status', {})
+        if IMAGELOAD_AVAILABLE:
+            try:
+                self.bowl_icon, self.bowl_icon_pal = adafruit_imageload.load(
+                    Config.BOWL_SPRITE_BMP
+                )
+                print("Bowl sprites loaded successfully")
+            except Exception as e:
+                print(f"Error loading bowl sprite: {e}")
+                print("Will use text-only display")
         else:
-            print(f"API returned status code: {response.status_code}")
+            print("Using text-only display (imageload not available)")
+
+    def connect_wifi(self, max_attempts=Config.MAX_RETRIES):
+        """
+        Connect to WiFi with retry logic
+        Returns: True if connected, False otherwise
+        """
+        for attempt in range(max_attempts):
+            try:
+                if wifi.radio.connected:
+                    print("Already connected to WiFi")
+                    self.connection_failures = 0
+                    return True
+
+                print(f'Connecting to {secrets["ssid"]} '
+                      f'(attempt {attempt + 1}/{max_attempts})')
+
+                wifi.radio.connect(
+                    secrets["ssid"],
+                    secrets["password"]
+                )
+
+                print(f'Connected! IP: {wifi.radio.ipv4_address}')
+                self.connection_failures = 0
+                return True
+
+            except Exception as e:
+                print(f"WiFi connection failed: {e}")
+                if attempt < max_attempts - 1:
+                    time.sleep(Config.RETRY_DELAY)
+
+        self.connection_failures += 1
+        return False
+
+    def ensure_wifi_connected(self):
+        """Check WiFi connection and reconnect if needed"""
+        if not wifi.radio.connected:
+            print("WiFi disconnected, attempting to reconnect...")
+            return self.connect_wifi()
+        return True
+
+    def set_device_time(self):
+        """
+        Set device RTC from time API
+        Returns: True if successful, False otherwise
+        """
+        if not self.ensure_wifi_connected():
+            return False
+
+        try:
+            if not self.requests:
+                self.requests = adafruit_requests.Session(
+                    self.pool,
+                    ssl.create_default_context()
+                )
+
+            print("Fetching current time...")
+            response = self.requests.get(Config.TIME_URL, timeout=10)
+
+            if response.status_code == 200:
+                data = response.json()
+
+                # Parse the datetime string
+                dt_string = data['datetime']
+                d = datetime.datetime.fromisoformat(dt_string.split('.')[0])
+
+                # Set the RTC
+                rtc.RTC().datetime = time.struct_time((
+                    d.year, d.month, d.day,
+                    d.hour, d.minute, d.second,
+                    d.weekday(),
+                    data['day_of_year'],
+                    -1 if data['dst'] else 0
+                ))
+
+                print(f"Device time set to: {d}")
+                return True
+
+        except Exception as e:
+            print(f"Error setting device time: {e}")
+
+        return False
+
+    def test_connectivity(self):
+        """Test network connectivity to various endpoints"""
+        print("\n=== Testing Network Connectivity ===")
+
+        # Test endpoints
+        test_urls = [
+            ("Time API", Config.TIME_URL),
+            ("Dog Feed API", Config.DOG_FEED_STATUS_URL),
+            ("MQTT Broker", f"http://{secrets['mqtt_broker']}:1880/")
+        ]
+
+        for name, url in test_urls:
+            try:
+                print(f"Testing {name}: {url}")
+                response = self.requests.get(url, timeout=5)
+                print(f"  ✓ {name} reachable (status: {response.status_code})")
+            except Exception as e:
+                print(f"  ✗ {name} not reachable: {e}")
+
+        print("=== Connectivity Test Complete ===\n")
+
+    def fetch_dog_feed_status(self):
+        """
+        Fetch dog feeding status from REST API
+        Returns: Status dictionary or None
+        """
+        if not self.ensure_wifi_connected():
             return None
 
-    except Exception as e:
-        print(f"Error fetching dog feed status: {e}")
+        for attempt in range(Config.MAX_RETRIES):
+            try:
+                if not self.requests:
+                    return None
+
+                print(f"Fetching dog feed status "
+                      f"(attempt {attempt + 1}/{Config.MAX_RETRIES})...")
+
+                response = self.requests.get(
+                    Config.DOG_FEED_STATUS_URL,
+                    timeout=Config.HTTP_TIMEOUT
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    status = data.get('dog_feed_status', {})
+
+                    # Log status
+                    morning = "Yes" if status.get('morning') else "No"
+                    evening = "Yes" if status.get('evening') else "No"
+                    print(f"Status: Morning fed: {morning}, Evening fed: {evening}")
+
+                    return status
+                else:
+                    print(f"API returned status code: {response.status_code}")
+                    print(f"Response text: {response.text[:200]}")  # First 200 chars
+
+            except Exception as e:
+                print(f"Error fetching status: {e}")
+                if attempt < Config.MAX_RETRIES - 1:
+                    time.sleep(Config.RETRY_DELAY)
+
         return None
 
+    def parse_timestamp(self, timestamp_str):
+        """
+        Parse timestamp string to display format (HH:MM)
+        Returns: Formatted time string or None
+        """
+        if not timestamp_str:
+            return None
 
-def update_display_from_status(status_data):
-    """Update the display based on the API response"""
-    global morning_sprite, morning_sprite_label
-    global evening_sprite, evening_sprite_label
-    global last_refresh
-
-    if not status_data:
-        print("No status data available")
-        return
-
-    morning_status = status_data.get('morning')
-    evening_status = status_data.get('evening')
-
-    # Update morning status
-    if morning_status:
-        pixels[3] = GREEN
-        morning_sprite[0] = 1
-        # Extract time from the status if it's a timestamp, otherwise use as-is
-        display_time = morning_status
-        if 'T' in morning_status:  # ISO format timestamp
-            try:
-                dt = datetime.datetime.fromisoformat(morning_status.replace('Z', '+00:00'))
-                display_time = dt.strftime('%H:%M')
-            except:
-                pass
-        morning_sprite_label.text = f"Fed at {display_time}"
-    else:
-        pixels[3] = RED
-        morning_sprite[0] = 0
-        morning_sprite_label.text = "Not fed"
-
-    # Update evening status
-    if evening_status:
-        pixels[0] = GREEN
-        evening_sprite[0] = 1
-        # Extract time from the status if it's a timestamp, otherwise use as-is
-        display_time = evening_status
-        if 'T' in evening_status:  # ISO format timestamp
-            try:
-                dt = datetime.datetime.fromisoformat(evening_status.replace('Z', '+00:00'))
-                display_time = dt.strftime('%H:%M')
-            except:
-                pass
-        evening_sprite_label.text = f"Fed at {display_time}"
-    else:
-        pixels[0] = RED
-        evening_sprite[0] = 0
-        evening_sprite_label.text = "Not fed"
-
-    # Refresh display with rate limiting
-    now = time.time()
-    if not last_refresh or now > last_refresh + 5:
-        board.DISPLAY.refresh()
-        last_refresh = time.time()
-        print("Display updated")
-
-
-def check_time_window():
-    """checks current time to see if device should be "on", or set to deep sleep"""
-    now = datetime.datetime.now()
-
-    morning = datetime.time(TimeWindow.MORNING_START, 0, 0)
-    evening = datetime.time(TimeWindow.EVENING_START, 0, 0)
-
-    seconds = 0
-    if now.hour < TimeWindow.MORNING_START:
-        target = datetime.datetime.combine(now, morning)
-        diff = target - now
-        seconds = diff.total_seconds()
-    elif now.hour >= TimeWindow.MORNING_END and now.hour < TimeWindow.EVENING_START:
-        target = datetime.datetime.combine(now, evening)
-        diff = target - now
-        seconds = diff.total_seconds()
-    elif now.hour >= TimeWindow.EVENING_END:
-        print("It is time to sleep!")
-
-        tomorrow = now + datetime.timedelta(days=1)
-        tomorrow = datetime.datetime.combine(tomorrow, morning)
-
-        diff = tomorrow - now
-        seconds = diff.total_seconds()
-
-    if seconds > 0:
-        print(f"Sleeping for {seconds} seconds.")
-        # Create a an alarm that will trigger some amount of seconds from now.
-        time_alarm = alarm.time.TimeAlarm(monotonic_time=time.monotonic() + seconds)
-        # Exit the program, and then deep sleep until the alarm wakes us.
-        alarm.exit_and_deep_sleep_until_alarms(time_alarm)
-
-
-def setup_panel(x_offset=0):
-    sprite = displayio.TileGrid(
-        bowl_icon,
-        pixel_shader=bowl_icon_pal,
-        x=5 + x_offset,
-        y=20,
-        width=1,
-        height=1,
-        tile_width=140,
-        tile_height=82,
-    )
-
-    sprite_label = label.Label(terminalio.FONT, text="Not fed", color=0x000000)
-    sprite_label.anchor_point = (0, 0)
-    sprite_label.anchored_position = (13 + x_offset, 95)
-
-    group = displayio.Group()
-    group.append(sprite)
-    group.append(sprite_label)
-
-    return group, sprite, sprite_label
-
-
-def setup_mqtt_client(pool):
-    """create a mqtt client with information from secrets, set up callbacks"""
-
-    # Set up a MiniMQTT Client
-    mqtt_client = MQTT.MQTT(
-        broker=secrets["mqtt_broker"],
-        port=secrets["mqtt_port"],
-        username=secrets["mqtt_username"],
-        password=secrets["mqtt_password"],
-        socket_pool=pool,
-        is_ssl=False
-    )
-
-    # Connect callback handlers to mqtt_client
-    mqtt_client.on_connect = connect
-    mqtt_client.on_disconnect = disconnect
-    mqtt_client.add_topic_callback(dog_fed_morning_topic, dog_feeding_trigger)
-    mqtt_client.add_topic_callback(dog_fed_evening_topic, dog_feeding_trigger)
-
-    return mqtt_client
-
-
-def connect(mqtt_client, userdata, flags, rc):
-    """callback when connection made to MQTT broker"""
-    print("Connected to MQTT Broker!")
-    mqtt_client.subscribe(dog_fed_morning_topic)
-    mqtt_client.subscribe(dog_fed_evening_topic)
-
-
-def disconnect(mqtt_client, userdata, rc):
-    """callback when disconnected from MQTT broker"""
-    print("Disconnected from MQTT Broker!")
-
-
-def subscribe(mqtt_client, userdata, topic, granted_qos):
-    """This method is called when the mqtt_client subscribes to a new feed."""
-    print(f"Subscribed to {topic} with QOS level {granted_qos}")
-
-
-def dog_feeding_trigger(client, topic, message):
-    """MQTT callback that triggers a REST API call to update status"""
-    print(f"Received trigger on {topic}: {message}")
-
-    # Fetch latest status from API
-    status_data = fetch_dog_feed_status()
-    if status_data:
-        update_display_from_status(status_data)
-    else:
-        print("Failed to fetch status from API")
-
-
-def main():
-    global morning_sprite, morning_sprite_label
-    global evening_sprite, evening_sprite_label
-    global last_refresh, requests
-
-    print(f'Connecting to {secrets["ssid"]}')
-    wifi.radio.connect(secrets["ssid"], secrets["password"])
-    print(f'Connected to {secrets["ssid"]}')
-
-    # Create a socket pool
-    pool = socketpool.SocketPool(wifi.radio)
-
-    # Initialize requests session
-    requests = adafruit_requests.Session(pool, ssl.create_default_context())
-
-    # set up default state for neopixels
-    pixels[3] = RED
-    pixels[0] = RED
-
-    # Set up display
-    splash = displayio.Group(scale=1)
-    bg_group = displayio.Group()
-    position = (0, 0)
-    background = displayio.OnDiskBitmap(BACKGROUND)
-    bg_sprite = displayio.TileGrid(
-        background,
-        pixel_shader=background.pixel_shader,
-        x=position[0],
-        y=position[1],
-    )
-    bg_group.append(bg_sprite)
-    splash.append(bg_group)
-
-    morning_group, morning_sprite, morning_sprite_label = setup_panel()
-    evening_group, evening_sprite, evening_sprite_label = setup_panel(147)
-    splash.append(morning_group)
-    splash.append(evening_group)
-
-    board.DISPLAY.show(splash)
-    board.DISPLAY.refresh()
-    last_refresh = time.time()
-
-    # Set up MQTT client for triggers
-    mqtt_client = setup_mqtt_client(pool)
-
-    print(f"Attempting to connect to {mqtt_client.broker}")
-    mqtt_client.connect()
-
-    # Initial status fetch
-    print("Fetching initial dog feed status...")
-    initial_status = fetch_dog_feed_status()
-    if initial_status:
-        update_display_from_status(initial_status)
-
-    last_sync = None
-    last_status_fetch = None
-
-    while True:
-        # Sync device time once an hour
-        if not last_sync or (time.monotonic() - last_sync) > 3600:
-            print("Syncing device time")
-            set_device_time(pool)
-            last_sync = time.monotonic()
-
-        # Check if it's time to sleep
-        check_time_window()
-
-        # Handle MQTT messages (triggers)
         try:
-            mqtt_client.loop()
+            # Handle ISO format timestamps
+            if 'T' in timestamp_str:
+                # Split on T and take time portion
+                time_part = timestamp_str.split('T')[1]
+                # Remove timezone info and microseconds
+                time_part = time_part.split('.')[0].split('Z')[0]
+                # Extract hours and minutes
+                hour, minute = time_part.split(':')[:2]
+                return f"{hour}:{minute}"
+
+            # If already a time string, return as-is
+            return timestamp_str
+
         except Exception as e:
-            print(f"MQTT error: {e}")
+            print(f"Error parsing timestamp '{timestamp_str}': {e}")
+            return timestamp_str
+
+    def update_display_from_status(self, status_data, force_refresh=True):
+        """Update the display and NeoPixels based on feeding status"""
+        if not status_data:
+            print("No status data to display")
+            return
+
+        morning_status = status_data.get('morning')
+        evening_status = status_data.get('evening')
+
+        # Track if anything changed
+        display_changed = False
+
+        # Update morning status
+        if morning_status:
+            self.pixels[Config.MORNING_PIXEL] = Config.PIXEL_GREEN
+            if self.morning_sprite:
+                if self.morning_sprite[0] != 1:
+                    self.morning_sprite[0] = 1  # Show filled bowl
+                    display_changed = True
+            if self.morning_sprite_label:
+                display_time = self.parse_timestamp(morning_status)
+                new_text = f"Fed at {display_time}" if display_time else "Fed"
+                if self.morning_sprite_label.text != new_text:
+                    self.morning_sprite_label.text = new_text
+                    display_changed = True
+        else:
+            self.pixels[Config.MORNING_PIXEL] = Config.PIXEL_RED
+            if self.morning_sprite:
+                if self.morning_sprite[0] != 0:
+                    self.morning_sprite[0] = 0  # Show empty bowl
+                    display_changed = True
+            if self.morning_sprite_label:
+                if self.morning_sprite_label.text != "Not fed":
+                    self.morning_sprite_label.text = "Not fed"
+                    display_changed = True
+
+        # Update evening status
+        if evening_status:
+            self.pixels[Config.EVENING_PIXEL] = Config.PIXEL_GREEN
+            if self.evening_sprite:
+                if self.evening_sprite[0] != 1:
+                    self.evening_sprite[0] = 1  # Show filled bowl
+                    display_changed = True
+            if self.evening_sprite_label:
+                display_time = self.parse_timestamp(evening_status)
+                new_text = f"Fed at {display_time}" if display_time else "Fed"
+                if self.evening_sprite_label.text != new_text:
+                    self.evening_sprite_label.text = new_text
+                    display_changed = True
+        else:
+            self.pixels[Config.EVENING_PIXEL] = Config.PIXEL_RED
+            if self.evening_sprite:
+                if self.evening_sprite[0] != 0:
+                    self.evening_sprite[0] = 0  # Show empty bowl
+                    display_changed = True
+            if self.evening_sprite_label:
+                if self.evening_sprite_label.text != "Not fed":
+                    self.evening_sprite_label.text = "Not fed"
+                    display_changed = True
+
+        # Show pixels (in case auto_write is False)
+        self.pixels.show()
+
+        # Only refresh display if something changed or forced
+        if display_changed or force_refresh:
+            self.refresh_display()
+        else:
+            print("No display changes, skipping refresh")
+
+    def refresh_display(self):
+        """Safely refresh the e-ink display with rate limiting"""
+        current_time = time.monotonic()
+
+        # Increased minimum interval to prevent rapid refreshes
+        if current_time - self.last_refresh >= 10:  # Changed from 5 to 10 seconds
             try:
-                mqtt_client.connect()
+                print("Refreshing display...")
+                board.DISPLAY.refresh()
+                self.last_refresh = current_time
+                print("Display refreshed")
+            except RuntimeError as e:
+                # Handle "refresh too soon" errors
+                if "too soon" in str(e).lower():
+                    print(f"Display refresh skipped: {e}")
+                else:
+                    raise
+        else:
+            print(f"Skipping refresh, too soon (last: {current_time - self.last_refresh:.1f}s ago)")
+
+    def check_time_window(self):
+        """Check if device should be active or enter deep sleep"""
+        # Get current time
+        current = rtc.RTC().datetime
+        now = datetime.datetime(
+            current.tm_year, current.tm_mon, current.tm_mday,
+            current.tm_hour, current.tm_min, current.tm_sec
+        )
+
+        seconds_to_sleep = 0
+        sleep_reason = ""
+
+        if now.hour < Config.MORNING_START:
+            # Before morning window
+            target = datetime.datetime(
+                now.year, now.month, now.day,
+                Config.MORNING_START, 0, 0
+            )
+            seconds_to_sleep = (target - now).total_seconds()
+            sleep_reason = "before morning window"
+
+        elif Config.MORNING_END <= now.hour < Config.EVENING_START:
+            # Between windows
+            target = datetime.datetime(
+                now.year, now.month, now.day,
+                Config.EVENING_START, 0, 0
+            )
+            seconds_to_sleep = (target - now).total_seconds()
+            sleep_reason = "between feeding windows"
+
+        elif now.hour >= Config.EVENING_END:
+            # After evening window
+            tomorrow = now + datetime.timedelta(days=1)
+            target = datetime.datetime(
+                tomorrow.year, tomorrow.month, tomorrow.day,
+                Config.MORNING_START, 0, 0
+            )
+            seconds_to_sleep = (target - now).total_seconds()
+            sleep_reason = "after evening window"
+
+        if seconds_to_sleep > 60:  # Only sleep if more than 1 minute
+            hours = seconds_to_sleep / 3600
+            print(f"Entering deep sleep ({sleep_reason}) for {hours:.1f} hours")
+
+            # Cleanup before sleep
+            self.before_sleep()
+
+            # Create time alarm for next wake
+            time_alarm = alarm.time.TimeAlarm(
+                monotonic_time=time.monotonic() + seconds_to_sleep
+            )
+
+            # Enter deep sleep
+            alarm.exit_and_deep_sleep_until_alarms(time_alarm)
+
+    def before_sleep(self):
+        """Cleanup tasks before entering deep sleep"""
+        print("Preparing for deep sleep...")
+
+        # Turn off all NeoPixels to save power
+        self.pixels.fill(Config.PIXEL_OFF)
+        self.pixels.show()
+
+        # Disconnect MQTT if connected
+        if self.mqtt_client and self.mqtt_connected:
+            try:
+                self.mqtt_client.disconnect()
+                print("MQTT disconnected")
             except:
                 pass
 
-        # Periodic status fetch (every 5 minutes) as fallback
-        now = time.monotonic()
-        if not last_status_fetch or (now - last_status_fetch) > 300:  # 5 minutes
-            print("Periodic status fetch...")
-            status_data = fetch_dog_feed_status()
-            if status_data:
-                update_display_from_status(status_data)
-            last_status_fetch = now
+        # Force garbage collection
+        gc.collect()
 
-        time.sleep(3)
+    def setup_panel(self, x_offset=0):
+        """
+        Create a display panel for morning or evening status
+        Returns: (group, sprite, label)
+        """
+        group = displayio.Group()
+
+        # Create tile grid for bowl sprite if available
+        sprite = None
+        if self.bowl_icon and self.bowl_icon_pal:
+            sprite = displayio.TileGrid(
+                self.bowl_icon,
+                pixel_shader=self.bowl_icon_pal,
+                x=5 + x_offset,
+                y=20,
+                width=1,
+                height=1,
+                tile_width=140,
+                tile_height=82,
+                default_tile=0  # Start with empty bowl
+            )
+            group.append(sprite)
+
+        # Create text label (moved down by 10 pixels)
+        y_position = 105 if sprite else 50  # Changed from 95 to 105
+        sprite_label = label.Label(
+            terminalio.FONT,
+            text="Not fed",
+            color=0x000000,
+            x=13 + x_offset,
+            y=y_position
+        )
+        group.append(sprite_label)
+
+        # Add a title label if no sprite
+        if not sprite:
+            title_text = "MORNING" if x_offset == 0 else "EVENING"
+            title_label = label.Label(
+                terminalio.FONT,
+                text=title_text,
+                color=0x000000,
+                x=13 + x_offset,
+                y=30
+            )
+            group.append(title_label)
+
+        return group, sprite, sprite_label
+
+    def setup_display(self):
+        """Initialize the e-ink display with background and panels"""
+        print("Setting up display...")
+
+        # Create main display group
+        main_group = displayio.Group()
+
+        # Try to load and add background
+        background_loaded = False
+        if IMAGELOAD_AVAILABLE:
+            try:
+                background = displayio.OnDiskBitmap(Config.BACKGROUND_BMP)
+                bg_sprite = displayio.TileGrid(
+                    background,
+                    pixel_shader=background.pixel_shader,
+                    x=0,
+                    y=0
+                )
+                main_group.append(bg_sprite)
+                background_loaded = True
+            except Exception as e:
+                print(f"Could not load background: {e}")
+
+        # If no background, create a simple white background
+        if not background_loaded:
+            # Create a white background using a palette
+            white_palette = displayio.Palette(1)
+            white_palette[0] = 0xFFFFFF  # White
+
+            white_bg = displayio.TileGrid(
+                displayio.Bitmap(296, 128, 1),  # MagTag display size
+                pixel_shader=white_palette,
+                x=0,
+                y=0
+            )
+            main_group.append(white_bg)
+
+            # Add a title at the top
+            title_label = label.Label(
+                terminalio.FONT,
+                text="DOG FEEDING TRACKER",
+                color=0x000000,
+                x=75,
+                y=10
+            )
+            main_group.append(title_label)
+
+        # Create morning and evening panels
+        morning_group, self.morning_sprite, self.morning_sprite_label = (
+            self.setup_panel(Config.MORNING_X_OFFSET)
+        )
+        evening_group, self.evening_sprite, self.evening_sprite_label = (
+            self.setup_panel(Config.EVENING_X_OFFSET)
+        )
+
+        # Add panels to main group
+        main_group.append(morning_group)
+        main_group.append(evening_group)
+
+        # Show on display using root_group (CircuitPython 10)
+        board.DISPLAY.root_group = main_group
+
+        # Initial refresh
+        try:
+            board.DISPLAY.refresh()
+            self.last_refresh = time.monotonic()
+            print("Display initialized")
+        except Exception as e:
+            print(f"Initial display refresh failed: {e}")
+
+    def setup_mqtt_client(self):
+        """Create and configure MQTT client"""
+        print("Setting up MQTT client...")
+
+        self.mqtt_client = MQTT.MQTT(
+            broker=secrets["mqtt_broker"],
+            port=secrets.get("mqtt_port", 1883),
+            username=secrets.get("mqtt_username"),
+            password=secrets.get("mqtt_password"),
+            socket_pool=self.pool,
+            is_ssl=False,
+            keep_alive=60  # CircuitPython 10 supports keep_alive
+        )
+
+        # Set callbacks
+        self.mqtt_client.on_connect = self.on_mqtt_connect
+        self.mqtt_client.on_disconnect = self.on_mqtt_disconnect
+        self.mqtt_client.on_message = self.on_mqtt_message
+
+        # Add topic callbacks
+        self.mqtt_client.add_topic_callback(
+            Config.MQTT_MORNING_TOPIC,
+            self.on_feeding_trigger
+        )
+        self.mqtt_client.add_topic_callback(
+            Config.MQTT_EVENING_TOPIC,
+            self.on_feeding_trigger
+        )
+
+    def on_mqtt_connect(self, client, userdata, flags, rc):
+        """MQTT connection callback"""
+        print(f"Connected to MQTT Broker! (RC: {rc})")
+        self.mqtt_connected = True
+
+        # Subscribe to topics
+        client.subscribe(Config.MQTT_MORNING_TOPIC)
+        client.subscribe(Config.MQTT_EVENING_TOPIC)
+        print(f"Subscribed to feeding topics")
+
+    def on_mqtt_disconnect(self, client, userdata, rc):
+        """MQTT disconnection callback"""
+        print(f"Disconnected from MQTT Broker (RC: {rc})")
+        self.mqtt_connected = False
+
+    def on_mqtt_message(self, client, topic, message):
+        """General MQTT message callback"""
+        print(f"Message on {topic}: {message}")
+
+    def on_feeding_trigger(self, client, topic, message):
+        """Feeding-specific MQTT trigger callback"""
+        print(f"Feeding trigger on {topic}: {message}")
+
+        # Fetch latest status from API
+        status_data = self.fetch_dog_feed_status()
+        if status_data:
+            # Force refresh on MQTT trigger since something likely changed
+            self.update_display_from_status(status_data, force_refresh=True)
+        else:
+            print("Failed to fetch status after MQTT trigger")
+
+    def connect_mqtt(self):
+        """
+        Connect to MQTT broker with error handling
+        Returns: True if connected, False otherwise
+        """
+        if not self.mqtt_client:
+            return False
+
+        try:
+            print(f"Connecting to MQTT broker {self.mqtt_client.broker}...")
+            self.mqtt_client.connect()
+            self.mqtt_connected = True
+            return True
+        except Exception as e:
+            print(f"MQTT connection failed: {e}")
+            self.mqtt_connected = False
+            return False
+
+    def run(self):
+        """Main run loop"""
+        print("\n=== Dog Feeding Tracker Starting ===")
+        print(f"CircuitPython {'.'.join(map(str, sys.implementation.version))}")
+
+        # Initial WiFi connection
+        if not self.connect_wifi():
+            print("Failed to connect to WiFi, will retry after sleep...")
+            time.sleep(30)
+            microcontroller.reset()
+
+        # Create socket pool for network operations
+        self.pool = socketpool.SocketPool(wifi.radio)
+
+        # Initialize requests session
+        self.requests = adafruit_requests.Session(
+            self.pool,
+            ssl.create_default_context()
+        )
+
+        # Set device time
+        if not self.set_device_time():
+            print("Warning: Could not sync device time")
+
+        # Test network connectivity
+        self.test_connectivity()
+
+        # Initialize display
+        self.setup_display()
+
+        # Set initial NeoPixel state (red = not fed)
+        self.pixels[Config.MORNING_PIXEL] = Config.PIXEL_RED
+        self.pixels[Config.EVENING_PIXEL] = Config.PIXEL_RED
+        self.pixels.show()
+
+        # Set up MQTT
+        self.setup_mqtt_client()
+        self.connect_mqtt()
+
+        # Fetch initial status
+        print("\nFetching initial feeding status...")
+        initial_status = self.fetch_dog_feed_status()
+        if initial_status:
+            self.update_display_from_status(initial_status, force_refresh=True)
+
+        print("\nEntering main loop...")
+
+        # Main loop
+        while True:
+            try:
+                # Check if we should sleep (outside feeding windows)
+                # Temporarily disabled for testing
+                # self.check_time_window()
+
+                # Periodic time sync
+                if time.monotonic() - self.last_sync > Config.TIME_SYNC_INTERVAL:
+                    print("\nSyncing device time...")
+                    if self.set_device_time():
+                        self.last_sync = time.monotonic()
+
+                # Handle MQTT
+                if self.mqtt_client:
+                    if self.mqtt_connected:
+                        try:
+                            # Non-blocking loop with timeout
+                            self.mqtt_client.loop(timeout=Config.MQTT_LOOP_TIMEOUT)
+                        except Exception as e:
+                            print(f"MQTT loop error: {e}")
+                            self.mqtt_connected = False
+                    else:
+                        # Try to reconnect
+                        self.connect_mqtt()
+
+                # Periodic status fetch (fallback)
+                if time.monotonic() - self.last_status_fetch > Config.STATUS_FETCH_INTERVAL:
+                    print("\nPeriodic status check...")
+                    status_data = self.fetch_dog_feed_status()
+                    if status_data:
+                        # Don't force refresh for periodic updates
+                        self.update_display_from_status(status_data, force_refresh=False)
+                    self.last_status_fetch = time.monotonic()
+
+                # Check connection health
+                if self.connection_failures > Config.CONNECTION_FAILURE_THRESHOLD:
+                    print(f"\nToo many failures ({self.connection_failures}), resetting...")
+                    microcontroller.reset()
+
+                # Free up memory periodically
+                gc.collect()
+
+                # Small delay to prevent tight loop
+                time.sleep(3)
+
+            except MemoryError as e:
+                print(f"Memory error: {e}")
+                gc.collect()
+                time.sleep(5)
+
+            except Exception as e:
+                print(f"Main loop error: {e}")
+                time.sleep(5)
+
+
+# Check if we're waking from deep sleep
+print("\n" + "="*50)
+if alarm.wake_alarm:
+    print("Woke from deep sleep!")
+else:
+    print("Fresh start (not from deep sleep)")
+
+# Import sys for version info
+import sys
+
+# Run the tracker
+def main():
+    """Entry point for the dog feeding tracker"""
+    try:
+        tracker = DogFeedingTracker()
+        tracker.run()
+    except Exception as e:
+        print(f"Fatal error: {e}")
+        # Wait before reset to allow reading error
+        time.sleep(10)
+        microcontroller.reset()
 
 
 if __name__ == '__main__':
