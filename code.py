@@ -2,8 +2,10 @@
 Dog Feeding Tracker for Adafruit MagTag
 CircuitPython 10.x compatible
 Tracks morning and evening dog feeding status with e-ink display
+Uses settings.toml for configuration
 """
 
+import os
 import gc
 import json
 import ssl
@@ -20,20 +22,8 @@ import microcontroller
 import adafruit_datetime as datetime
 import adafruit_minimqtt.adafruit_minimqtt as MQTT
 import adafruit_requests
-try:
-    import adafruit_imageload
-    IMAGELOAD_AVAILABLE = True
-except (ImportError, ValueError) as e:
-    print(f"Warning: adafruit_imageload not available: {e}")
-    IMAGELOAD_AVAILABLE = False
+import adafruit_imageload
 from adafruit_display_text import label
-
-# Import secrets from secrets.py file
-try:
-    from secrets import secrets
-except ImportError:
-    print("WiFi secrets not found in secrets.py")
-    raise
 
 # Configuration class for all settings
 class Config:
@@ -47,9 +37,8 @@ class Config:
 
     # API endpoints
     TIME_URL = "http://worldtimeapi.org/api/timezone/America/New_York"
-    # Use IP address instead of hostname for local network
-    # Update this to your Home Assistant server's IP address
-    DOG_FEED_STATUS_URL = "http://192.168.1.85:1880/dog-feed-status"
+    # Get API URL from settings.toml or use default
+    DOG_FEED_STATUS_URL = os.getenv("DOG_FEED_API", "http://192.168.1.85:1880/dog-feed-status")
 
     # MQTT topics
     MQTT_MORNING_TOPIC = 'dog/fed/morning'
@@ -59,7 +48,7 @@ class Config:
     TIME_SYNC_INTERVAL = 3600  # 1 hour
     STATUS_FETCH_INTERVAL = 300  # 5 minutes
     DISPLAY_REFRESH_MIN_INTERVAL = 5  # Minimum time between display refreshes
-    MQTT_LOOP_TIMEOUT = 0.5  # MQTT loop timeout
+    MQTT_LOOP_TIMEOUT = 1.0  # MQTT loop timeout (must be >= socket timeout)
 
     # Retry settings
     MAX_RETRIES = 3
@@ -119,52 +108,39 @@ class DogFeedingTracker:
         self.connection_failures = 0
         self.mqtt_connected = False
 
-        # Load bowl icon sprite sheet if imageload is available
-        self.bowl_icon = None
-        self.bowl_icon_pal = None
+        # Track if this is first update
+        self.first_update = True
 
-        if IMAGELOAD_AVAILABLE:
-            try:
-                self.bowl_icon, self.bowl_icon_pal = adafruit_imageload.load(
-                    Config.BOWL_SPRITE_BMP
-                )
-                print("Bowl sprites loaded successfully")
-            except Exception as e:
-                print(f"Error loading bowl sprite: {e}")
-                print("Will use text-only display")
-        else:
-            print("Using text-only display (imageload not available)")
+        # Load bowl icon sprite sheet
+        self.bowl_icon, self.bowl_icon_pal = adafruit_imageload.load(
+            Config.BOWL_SPRITE_BMP
+        )
+        print("Bowl sprites loaded successfully")
 
     def connect_wifi(self, max_attempts=Config.MAX_RETRIES):
         """
-        Connect to WiFi with retry logic
+        Connect to WiFi - CircuitPython 10 auto-connects using settings.toml
         Returns: True if connected, False otherwise
         """
+        # CircuitPython automatically connects using CIRCUITPY_WIFI_SSID/PASSWORD
+        # We just need to verify the connection
         for attempt in range(max_attempts):
             try:
                 if wifi.radio.connected:
-                    print("Already connected to WiFi")
+                    print(f"WiFi connected! IP: {wifi.radio.ipv4_address}")
                     self.connection_failures = 0
                     return True
-
-                print(f'Connecting to {secrets["ssid"]} '
-                      f'(attempt {attempt + 1}/{max_attempts})')
-
-                wifi.radio.connect(
-                    secrets["ssid"],
-                    secrets["password"]
-                )
-
-                print(f'Connected! IP: {wifi.radio.ipv4_address}')
-                self.connection_failures = 0
-                return True
+                else:
+                    print(f"Waiting for WiFi connection (attempt {attempt + 1}/{max_attempts})...")
+                    time.sleep(2)
 
             except Exception as e:
-                print(f"WiFi connection failed: {e}")
+                print(f"WiFi error: {e}")
                 if attempt < max_attempts - 1:
                     time.sleep(Config.RETRY_DELAY)
 
         self.connection_failures += 1
+        print("Failed to connect to WiFi")
         return False
 
     def ensure_wifi_connected(self):
@@ -220,11 +196,14 @@ class DogFeedingTracker:
         """Test network connectivity to various endpoints"""
         print("\n=== Testing Network Connectivity ===")
 
+        # Get MQTT broker from settings
+        mqtt_broker = os.getenv("MQTT_BROKER", "192.168.1.85")
+
         # Test endpoints
         test_urls = [
             ("Time API", Config.TIME_URL),
             ("Dog Feed API", Config.DOG_FEED_STATUS_URL),
-            ("MQTT Broker", f"http://{secrets['mqtt_broker']}:1880/")
+            ("MQTT Broker HTTP", f"http://{mqtt_broker}:1880/")
         ]
 
         for name, url in test_urls:
@@ -368,8 +347,12 @@ class DogFeedingTracker:
         # Show pixels (in case auto_write is False)
         self.pixels.show()
 
-        # Only refresh display if something changed or forced
-        if display_changed or force_refresh:
+        # Always refresh on first update, otherwise based on changes
+        if self.first_update:
+            print("First status update - forcing display refresh")
+            self.refresh_display()
+            self.first_update = False
+        elif display_changed or force_refresh:
             self.refresh_display()
         else:
             print("No display changes, skipping refresh")
@@ -475,44 +458,29 @@ class DogFeedingTracker:
         """
         group = displayio.Group()
 
-        # Create tile grid for bowl sprite if available
-        sprite = None
-        if self.bowl_icon and self.bowl_icon_pal:
-            sprite = displayio.TileGrid(
-                self.bowl_icon,
-                pixel_shader=self.bowl_icon_pal,
-                x=5 + x_offset,
-                y=20,
-                width=1,
-                height=1,
-                tile_width=140,
-                tile_height=82,
-                default_tile=0  # Start with empty bowl
-            )
-            group.append(sprite)
+        # Create tile grid for bowl sprite
+        sprite = displayio.TileGrid(
+            self.bowl_icon,
+            pixel_shader=self.bowl_icon_pal,
+            x=5 + x_offset,
+            y=20,
+            width=1,
+            height=1,
+            tile_width=140,
+            tile_height=82,
+            default_tile=0  # Start with empty bowl
+        )
+        group.append(sprite)
 
-        # Create text label (moved down by 10 pixels)
-        y_position = 105 if sprite else 50  # Changed from 95 to 105
+        # Create text label
         sprite_label = label.Label(
             terminalio.FONT,
             text="Not fed",
             color=0x000000,
             x=13 + x_offset,
-            y=y_position
+            y=105  # Position below bowl sprite
         )
         group.append(sprite_label)
-
-        # Add a title label if no sprite
-        if not sprite:
-            title_text = "MORNING" if x_offset == 0 else "EVENING"
-            title_label = label.Label(
-                terminalio.FONT,
-                text=title_text,
-                color=0x000000,
-                x=13 + x_offset,
-                y=30
-            )
-            group.append(title_label)
 
         return group, sprite, sprite_label
 
@@ -523,45 +491,18 @@ class DogFeedingTracker:
         # Create main display group
         main_group = displayio.Group()
 
-        # Try to load and add background
-        background_loaded = False
-        if IMAGELOAD_AVAILABLE:
-            try:
-                background = displayio.OnDiskBitmap(Config.BACKGROUND_BMP)
-                bg_sprite = displayio.TileGrid(
-                    background,
-                    pixel_shader=background.pixel_shader,
-                    x=0,
-                    y=0
-                )
-                main_group.append(bg_sprite)
-                background_loaded = True
-            except Exception as e:
-                print(f"Could not load background: {e}")
-
-        # If no background, create a simple white background
-        if not background_loaded:
-            # Create a white background using a palette
-            white_palette = displayio.Palette(1)
-            white_palette[0] = 0xFFFFFF  # White
-
-            white_bg = displayio.TileGrid(
-                displayio.Bitmap(296, 128, 1),  # MagTag display size
-                pixel_shader=white_palette,
+        # Load and add background
+        try:
+            background = displayio.OnDiskBitmap(Config.BACKGROUND_BMP)
+            bg_sprite = displayio.TileGrid(
+                background,
+                pixel_shader=background.pixel_shader,
                 x=0,
                 y=0
             )
-            main_group.append(white_bg)
-
-            # Add a title at the top
-            title_label = label.Label(
-                terminalio.FONT,
-                text="DOG FEEDING TRACKER",
-                color=0x000000,
-                x=75,
-                y=10
-            )
-            main_group.append(title_label)
+            main_group.append(bg_sprite)
+        except Exception as e:
+            print(f"Could not load background: {e}")
 
         # Create morning and evening panels
         morning_group, self.morning_sprite, self.morning_sprite_label = (
@@ -578,23 +519,26 @@ class DogFeedingTracker:
         # Show on display using root_group (CircuitPython 10)
         board.DISPLAY.root_group = main_group
 
-        # Initial refresh
-        try:
-            board.DISPLAY.refresh()
-            self.last_refresh = time.monotonic()
-            print("Display initialized")
-        except Exception as e:
-            print(f"Initial display refresh failed: {e}")
+        # Don't refresh here - let the first status update do it
+        print("Display initialized (waiting for first status update to refresh)")
 
     def setup_mqtt_client(self):
         """Create and configure MQTT client"""
         print("Setting up MQTT client...")
 
+        # Get MQTT settings from environment variables (settings.toml)
+        mqtt_broker = os.getenv("MQTT_BROKER", "192.168.1.85")
+        mqtt_port = int(os.getenv("MQTT_PORT", "1883"))
+        mqtt_username = os.getenv("MQTT_USERNAME")
+        mqtt_password = os.getenv("MQTT_PASSWORD")
+
+        print(f"MQTT Broker: {mqtt_broker}:{mqtt_port}")
+
         self.mqtt_client = MQTT.MQTT(
-            broker=secrets["mqtt_broker"],
-            port=secrets.get("mqtt_port", 1883),
-            username=secrets.get("mqtt_username"),
-            password=secrets.get("mqtt_password"),
+            broker=mqtt_broker,
+            port=mqtt_port,
+            username=mqtt_username,
+            password=mqtt_password,
             socket_pool=self.pool,
             is_ssl=False,
             keep_alive=60  # CircuitPython 10 supports keep_alive
@@ -669,11 +613,16 @@ class DogFeedingTracker:
         print("\n=== Dog Feeding Tracker Starting ===")
         print(f"CircuitPython {'.'.join(map(str, sys.implementation.version))}")
 
-        # Initial WiFi connection
+        # Check WiFi connection (CircuitPython auto-connects from settings.toml)
         if not self.connect_wifi():
             print("Failed to connect to WiFi, will retry after sleep...")
             time.sleep(30)
             microcontroller.reset()
+
+        # Show network info
+        print(f"Network: {wifi.radio.ap_info.ssid if wifi.radio.ap_info else 'Unknown'}")
+        print(f"IP Address: {wifi.radio.ipv4_address}")
+        print(f"Signal Strength: {wifi.radio.ap_info.rssi if wifi.radio.ap_info else 'Unknown'} dBm")
 
         # Create socket pool for network operations
         self.pool = socketpool.SocketPool(wifi.radio)

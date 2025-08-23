@@ -1,0 +1,26 @@
+# Dog Feeding Tracker Configuration
+# Place this file in the root directory of your MagTag
+
+# WiFi Configuration
+# CircuitPython automatically connects using these credentials
+CIRCUITPY_WIFI_SSID = "your_wifi_ssid"
+CIRCUITPY_WIFI_PASSWORD = "your_wifi_password"
+CIRCUITPY_WIFI_HOSTNAME = "magtag-dogtracker"
+
+# Set timezone for automatic time sync (optional)
+CIRCUITPY_TIMEZONE = "America/New_York"
+
+# MQTT Configuration
+MQTT_BROKER = "192.168.1.85"
+MQTT_PORT = "1883"
+MQTT_USERNAME = "mqtt_username"
+MQTT_PASSWORD = "mqtt_password"
+
+# API Endpoints
+DOG_FEED_API = "http://192.168.1.85:1880/dog-feed-status"
+
+# Optional: Web workflow for development (CircuitPython 10)
+# Allows file access over web browser at http://[device-ip]
+# CIRCUITPY_WEB_API_PASSWORD = "your_api_password"
+# CIRCUITPY_WEB_API_PORT = "80"
+
