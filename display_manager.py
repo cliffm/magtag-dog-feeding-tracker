@@ -296,7 +296,8 @@ class DisplayManager:
             print(f"Skipping refresh, too soon (last: {time_since:.1f}s ago)")
 
     def shutdown(self):
-        """Turn off displays before sleep"""
-        print("Shutting down display...")
+        """Turn off LEDs before sleep (display persists on e-ink)"""
+        print("Turning off LEDs for sleep mode...")
         self.pixels.fill(Config.PIXEL_OFF)
         self.pixels.show()
+        # Note: E-ink display content persists without power, so we don't clear it

@@ -94,11 +94,15 @@ class DogFeedingTracker:
         """Enter deep sleep mode"""
         hours = seconds / 3600
         print(f"\nEntering deep sleep ({reason}) for {hours:.1f} hours")
+        print("Display will remain visible, LEDs will turn off")
 
-        # Cleanup before sleep
-        print("Preparing for deep sleep...")
+        # Turn off LEDs only (display persists on e-ink)
         self.display.shutdown()
+
+        # Disconnect network
         self.network.disconnect_mqtt()
+
+        # Clean up memory
         gc.collect()
 
         # Create time alarm
