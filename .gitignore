@@ -1,4 +1,8 @@
 .idea
+.DS_Storefin
+boot_out.txt
+settings.toml
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
