@@ -46,8 +46,8 @@ class DisplayManager:
         """Play a startup animation to indicate successful boot"""
         print("Playing startup animation...")
 
-        # Save current state
-        original_brightness = self.pixels.brightness
+        # Ensure brightness is set correctly after wake
+        self.pixels.brightness = Config.PIXEL_BRIGHTNESS
 
         # Quick green flash sequence
         for i in range(3):
@@ -73,8 +73,6 @@ class DisplayManager:
         self.pixels.fill(Config.PIXEL_OFF)
         self.pixels.show()
 
-        # Restore brightness
-        self.pixels.brightness = original_brightness
         time.sleep(0.5)
         print("Startup animation complete")
 
@@ -298,6 +296,12 @@ class DisplayManager:
     def shutdown(self):
         """Turn off LEDs before sleep (display persists on e-ink)"""
         print("Turning off LEDs for sleep mode...")
+        # Turn off all pixels explicitly
+        for i in range(Config.PIXEL_COUNT):
+            self.pixels[i] = Config.PIXEL_OFF
         self.pixels.fill(Config.PIXEL_OFF)
+        self.pixels.brightness = 0  # Set brightness to 0 as well
         self.pixels.show()
+        time.sleep(0.1)  # Small delay to ensure it takes effect
+        print(f"LEDs turned off (brightness: {self.pixels.brightness})")
         # Note: E-ink display content persists without power, so we don't clear it

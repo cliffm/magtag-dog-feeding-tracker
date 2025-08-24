@@ -56,6 +56,10 @@ class DogFeedingTracker:
             current.tm_hour, current.tm_min, current.tm_sec
         )
 
+        print(f"Sleep check - Time: {now.hour:02d}:{now.minute:02d}:{now.second:02d}", end="")
+        print(
+            f" (Hours: Morning {Config.MORNING_START}-{Config.MORNING_END}, Evening {Config.EVENING_START}-{Config.EVENING_END})")
+
         seconds_to_sleep = 0
         sleep_reason = ""
 
@@ -93,17 +97,27 @@ class DogFeedingTracker:
     def enter_deep_sleep(self, seconds, reason):
         """Enter deep sleep mode"""
         hours = seconds / 3600
-        print(f"\nEntering deep sleep ({reason}) for {hours:.1f} hours")
-        print("Display will remain visible, LEDs will turn off")
+        print(f"\n{'=' * 50}")
+        print(f"ENTERING DEEP SLEEP")
+        print(f"Reason: {reason}")
+        print(f"Duration: {hours:.1f} hours ({seconds:.0f} seconds)")
+        print(f"Display will remain visible, LEDs will turn off")
+        print(f"{'=' * 50}\n")
 
         # Turn off LEDs only (display persists on e-ink)
         self.display.shutdown()
 
+        # Give LEDs time to actually turn off
+        time.sleep(0.5)
+
         # Disconnect network
+        print("Disconnecting network...")
         self.network.disconnect_mqtt()
 
         # Clean up memory
         gc.collect()
+
+        print("Creating wake alarm and entering deep sleep NOW...")
 
         # Create time alarm
         time_alarm = alarm.time.TimeAlarm(
@@ -157,8 +171,7 @@ class DogFeedingTracker:
 
         while True:
             try:
-                # Check if we should sleep (disabled for testing)
-                # self.check_sleep_schedule()
+                self.check_sleep_schedule()
 
                 # Periodic time sync
                 if time.monotonic() - self.last_sync > Config.TIME_SYNC_INTERVAL:
