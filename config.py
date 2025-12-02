@@ -15,8 +15,6 @@ class Config:
     EVENING_START = 16
     EVENING_END = 21
 
-    # API endpoints
-    TIME_URL = "http://worldtimeapi.org/api/timezone/America/New_York"
     # Get API URL from settings.toml or use default
     DOG_FEED_STATUS_URL = os.getenv("DOG_FEED_API", "http://192.168.1.85:1880/dog-feed-status")
 

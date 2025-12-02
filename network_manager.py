@@ -4,13 +4,12 @@ Handles WiFi, MQTT, and HTTP API communications
 """
 
 import os
-import json
 import ssl
 import time
 import wifi
 import socketpool
 import rtc
-import adafruit_datetime as datetime
+import adafruit_ntp
 import adafruit_minimqtt.adafruit_minimqtt as MQTT
 import adafruit_requests
 from config import Config
@@ -75,35 +74,22 @@ class NetworkManager:
         return True
 
     def sync_time(self):
-        """Sync device time from NTP API"""
-        if not self.ensure_wifi_connected():
-            return False
+        print("Syncing time via NTP...")
 
         try:
-            print("Fetching current time...")
-            response = self.requests.get(Config.TIME_URL, timeout=10)
+            pool = socketpool.SocketPool(wifi.radio)
+            ntp = adafruit_ntp.NTP(pool, server="pool.ntp.org", tz_offset=-5)  # EST offset
+            now = ntp.datetime
 
-            if response.status_code == 200:
-                data = response.json()
+            print("Raw NTP time:", now)
 
-                # Parse the datetime
-                dt_string = data['datetime']
-                d = datetime.datetime.fromisoformat(dt_string.split('.')[0])
-
-                # Set the RTC
-                rtc.RTC().datetime = time.struct_time((
-                    d.year, d.month, d.day,
-                    d.hour, d.minute, d.second,
-                    d.weekday(),
-                    data['day_of_year'],
-                    -1 if data['dst'] else 0
-                ))
-
-                print(f"Device time set to: {d}")
-                return True
+            rtc.RTC().datetime = now
+            print("NTP sync OK")
+            return True
 
         except Exception as e:
-            print(f"Error setting device time: {e}")
+            print("NTP sync failed:", e)
+            return False
 
         return False
 
@@ -268,7 +254,6 @@ class NetworkManager:
         mqtt_broker = os.getenv("MQTT_BROKER", "192.168.1.85")
 
         test_urls = [
-            ("Time API", Config.TIME_URL),
             ("Dog Feed API", Config.DOG_FEED_STATUS_URL),
             ("MQTT HTTP", f"http://{mqtt_broker}:1880/")
         ]
