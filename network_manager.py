@@ -206,6 +206,73 @@ class NetworkManager:
             return self.connect_mqtt()
         return False
 
+    def publish_feeding_status(self, topic, fed=True):
+        """
+        Publish feeding status to MQTT topic
+
+        Args:
+            topic: MQTT topic to publish to
+            fed: True for fed (sends timestamp), False for not fed
+
+        Returns: True if published successfully
+        """
+        if not self.mqtt_client:
+            print("MQTT client not initialized")
+            return False
+
+        if not self.mqtt_connected:
+            print("MQTT not connected, attempting reconnect...")
+            if not self.connect_mqtt():
+                return False
+
+        try:
+            # Determine message payload
+            if fed:
+                # Generate timestamp in "H:MM:SS am/pm" format
+                message = self._get_current_timestamp()
+            else:
+                # Use configured payload for clearing, default to empty string
+                message = getattr(Config, 'MQTT_NOT_FED_PAYLOAD', '')
+
+            print(f"Publishing to {topic}: {message}")
+            self.mqtt_client.publish(topic, message)
+            print(f"Published successfully")
+            return True
+
+        except Exception as e:
+            print(f"MQTT publish error: {e}")
+            self.mqtt_connected = False
+            return False
+
+    def _get_current_timestamp(self):
+        """
+        Get current time as timestamp string in "H:MM:SS am/pm" format
+        Example: "5:45:50 pm"
+        """
+        current = rtc.RTC().datetime
+
+        hour = current.tm_hour
+        minute = current.tm_min
+        second = current.tm_sec
+
+        # Convert to 12-hour format
+        if hour == 0:
+            hour_12 = 12
+            period = "am"
+        elif hour < 12:
+            hour_12 = hour
+            period = "am"
+        elif hour == 12:
+            hour_12 = 12
+            period = "pm"
+        else:
+            hour_12 = hour - 12
+            period = "pm"
+
+        # Format: "H:MM:SS am/pm" (no leading zero on hour)
+        timestamp = f"{hour_12}:{minute:02d}:{second:02d} {period}"
+        return timestamp
+
     def disconnect_mqtt(self):
         """Disconnect MQTT client"""
         if self.mqtt_client and self.mqtt_connected:

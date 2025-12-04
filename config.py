@@ -22,6 +22,10 @@ class Config:
     MQTT_MORNING_TOPIC = 'dog/fed/morning'
     MQTT_EVENING_TOPIC = 'dog/fed/evening'
 
+    # MQTT payload for clearing fed status (fed status uses current timestamp)
+    # Set to empty string, "false", or whatever your backend expects
+    MQTT_NOT_FED_PAYLOAD = os.getenv("MQTT_NOT_FED_PAYLOAD", "")
+
     # Refresh intervals (seconds)
     TIME_SYNC_INTERVAL = 3600  # 1 hour
     STATUS_FETCH_INTERVAL = 300  # 5 minutes

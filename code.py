@@ -15,6 +15,7 @@ import adafruit_datetime as datetime
 from config import Config
 from display_manager import DisplayManager
 from network_manager import NetworkManager
+from button_manager import ButtonManager
 
 
 class DogFeedingTracker:
@@ -28,6 +29,7 @@ class DogFeedingTracker:
         # Components
         self.display = DisplayManager()
         self.network = NetworkManager(on_feeding_trigger=self.on_feeding_trigger)
+        self.buttons = None  # Initialized after setup
 
         # Timing
         self.last_sync = 0
@@ -152,6 +154,9 @@ class DogFeedingTracker:
         if self.network.setup_mqtt():
             self.network.connect_mqtt()
 
+        # Initialize button manager (after network and display are ready)
+        self.buttons = ButtonManager(self.network, self.display)
+
         # Fetch initial status
         print("\nFetching initial feeding status...")
         initial_status = self.network.fetch_dog_feed_status()
@@ -203,8 +208,14 @@ class DogFeedingTracker:
                 if time.monotonic() % 300 < 3:  # Every 5 minutes
                     gc.collect()
 
-                # Small delay
-                time.sleep(3)
+                # Poll for button presses during wait period
+                # This replaces the simple sleep(3) to catch button presses
+                wait_end = time.monotonic() + 3
+                while time.monotonic() < wait_end:
+                    if self.buttons and self.buttons.check_buttons():
+                        # Button was pressed, brief pause then continue
+                        time.sleep(0.3)
+                    time.sleep(0.05)  # 50ms polling interval
 
             except MemoryError as e:
                 print(f"Memory error: {e}")
