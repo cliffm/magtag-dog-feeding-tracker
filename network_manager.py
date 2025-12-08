@@ -78,7 +78,7 @@ class NetworkManager:
 
         try:
             pool = socketpool.SocketPool(wifi.radio)
-            ntp = adafruit_ntp.NTP(pool, server="pool.ntp.org", tz_offset=-5)  # EST offset
+            ntp = adafruit_ntp.NTP(pool, server="pool.ntp.org", tz_offset=Config.TIMEZONE_OFFSET)
             now = ntp.datetime
 
             print("Raw NTP time:", now)
@@ -212,7 +212,7 @@ class NetworkManager:
 
         Args:
             topic: MQTT topic to publish to
-            fed: True for fed (sends timestamp), False for not fed
+            fed: True for fed (sends ISO8601 UTC timestamp), False for not fed
 
         Returns: True if published successfully
         """
@@ -228,8 +228,8 @@ class NetworkManager:
         try:
             # Determine message payload
             if fed:
-                # Generate timestamp in "H:MM:SS am/pm" format
-                message = self._get_current_timestamp()
+                # Generate ISO8601 UTC timestamp
+                message = self._get_utc_iso8601_timestamp()
             else:
                 # Use configured payload for clearing, default to empty string
                 message = getattr(Config, 'MQTT_NOT_FED_PAYLOAD', '')
@@ -244,33 +244,57 @@ class NetworkManager:
             self.mqtt_connected = False
             return False
 
-    def _get_current_timestamp(self):
+    def _get_utc_iso8601_timestamp(self):
         """
-        Get current time as timestamp string in "H:MM:SS am/pm" format
-        Example: "5:45:50 pm"
+        Get current time as ISO8601 UTC timestamp string
+        Example: "2025-08-23T14:26:25Z"
+
+        RTC is set to local time, so we convert back to UTC by subtracting the offset
         """
         current = rtc.RTC().datetime
 
+        # Get local time components
+        year = current.tm_year
+        month = current.tm_mon
+        day = current.tm_mday
         hour = current.tm_hour
         minute = current.tm_min
         second = current.tm_sec
 
-        # Convert to 12-hour format
-        if hour == 0:
-            hour_12 = 12
-            period = "am"
-        elif hour < 12:
-            hour_12 = hour
-            period = "am"
-        elif hour == 12:
-            hour_12 = 12
-            period = "pm"
-        else:
-            hour_12 = hour - 12
-            period = "pm"
+        # Convert local time to UTC by subtracting timezone offset
+        # e.g., if offset is -5 (EST), UTC = local + 5
+        utc_hour = hour - Config.TIMEZONE_OFFSET
 
-        # Format: "H:MM:SS am/pm" (no leading zero on hour)
-        timestamp = f"{hour_12}:{minute:02d}:{second:02d} {period}"
+        # Handle day rollover
+        if utc_hour >= 24:
+            utc_hour -= 24
+            day += 1
+            # Handle month rollover (simplified - assumes 28-31 days)
+            days_in_month = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+            # Simple leap year check
+            if month == 2 and (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)):
+                days_in_month[2] = 29
+            if day > days_in_month[month]:
+                day = 1
+                month += 1
+                if month > 12:
+                    month = 1
+                    year += 1
+        elif utc_hour < 0:
+            utc_hour += 24
+            day -= 1
+            if day < 1:
+                month -= 1
+                if month < 1:
+                    month = 12
+                    year -= 1
+                days_in_month = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+                if month == 2 and (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)):
+                    days_in_month[2] = 29
+                day = days_in_month[month]
+
+        # Format as ISO8601 UTC: "2025-08-23T14:26:25Z"
+        timestamp = f"{year:04d}-{month:02d}-{day:02d}T{utc_hour:02d}:{minute:02d}:{second:02d}Z"
         return timestamp
 
     def disconnect_mqtt(self):

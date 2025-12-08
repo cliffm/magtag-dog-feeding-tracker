@@ -258,18 +258,53 @@ class DisplayManager:
         return changed
 
     def _parse_time(self, timestamp_str):
-        """Parse timestamp to HH:MM format"""
+        """
+        Parse ISO8601 UTC timestamp and convert to local time in 12-hour format
+        Input: "2025-08-23T14:26:25Z" (UTC)
+        Output: "9:26 AM" (local time with timezone offset applied)
+        """
         if not timestamp_str or timestamp_str == True:
             return None
 
         try:
             if 'T' in str(timestamp_str):
-                # ISO format - extract time
-                time_part = timestamp_str.split('T')[1]
-                time_part = time_part.split('.')[0].split('Z')[0]
-                hour, minute = time_part.split(':')[:2]
-                return f"{hour}:{minute}"
+                # ISO8601 format - extract date and time parts
+                date_part, time_part = timestamp_str.split('T')
+                time_part = time_part.split('.')[0].split('Z')[0]  # Remove fractional seconds and Z
+
+                hour_str, minute_str = time_part.split(':')[:2]
+                utc_hour = int(hour_str)
+                minute = int(minute_str)
+
+                # Convert UTC to local time by adding timezone offset
+                # e.g., if offset is -5 (EST), local = UTC - 5
+                local_hour = utc_hour + Config.TIMEZONE_OFFSET
+
+                # Handle day boundary (we only care about hour for display)
+                if local_hour >= 24:
+                    local_hour -= 24
+                elif local_hour < 0:
+                    local_hour += 24
+
+                # Convert to 12-hour format with AM/PM
+                if local_hour == 0:
+                    display_hour = 12
+                    period = "AM"
+                elif local_hour < 12:
+                    display_hour = local_hour
+                    period = "AM"
+                elif local_hour == 12:
+                    display_hour = 12
+                    period = "PM"
+                else:
+                    display_hour = local_hour - 12
+                    period = "PM"
+
+                return f"{display_hour}:{minute:02d} {period}"
+
+            # Fallback for non-ISO formats
             return str(timestamp_str)
+
         except Exception as e:
             print(f"Error parsing time '{timestamp_str}': {e}")
             return str(timestamp_str)

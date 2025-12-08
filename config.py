@@ -26,6 +26,10 @@ class Config:
     # Set to empty string, "false", or whatever your backend expects
     MQTT_NOT_FED_PAYLOAD = os.getenv("MQTT_NOT_FED_PAYLOAD", "")
 
+    # Timezone offset from UTC in hours (e.g., -5 for EST, -4 for EDT)
+    # Used for converting between UTC (MQTT) and local time (display)
+    TIMEZONE_OFFSET = int(os.getenv("TIMEZONE_OFFSET", "-5"))
+
     # Refresh intervals (seconds)
     TIME_SYNC_INTERVAL = 3600  # 1 hour
     STATUS_FETCH_INTERVAL = 300  # 5 minutes

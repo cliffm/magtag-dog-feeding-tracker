@@ -21,10 +21,13 @@ from button_manager import ButtonManager
 class DogFeedingTracker:
     """Main application class"""
 
-    def __init__(self):
+    def __init__(self, woke_from_sleep=False):
         """Initialize the tracker"""
         print("\n=== Dog Feeding Tracker Starting ===")
         print(f"CircuitPython {'.'.join(map(str, sys.implementation.version))}")
+
+        # Track if we woke from deep sleep
+        self.woke_from_sleep = woke_from_sleep
 
         # Components
         self.display = DisplayManager()
@@ -161,11 +164,27 @@ class DogFeedingTracker:
         print("\nFetching initial feeding status...")
         initial_status = self.network.fetch_dog_feed_status()
         if initial_status:
+            # Always force refresh on startup, especially after deep sleep wake
             self.display.update_status(
                 initial_status.get('morning'),
                 initial_status.get('evening'),
                 force_refresh=True
             )
+        elif self.woke_from_sleep:
+            # Even if fetch failed, force a display refresh after deep sleep
+            # to ensure the display is updated with current state
+            print("Status fetch failed but forcing refresh after deep sleep wake")
+            self.display.refresh_display()
+
+        # If we woke from deep sleep, do an extra explicit refresh
+        # This ensures the e-ink display is fully updated after potentially
+        # many hours of sleep
+        if self.woke_from_sleep:
+            print("\n*** Woke from deep sleep - ensuring display is refreshed ***")
+            # Small delay to let any pending display operations complete
+            time.sleep(1)
+            # Force another refresh to ensure display is current
+            self.display.refresh_display()
 
     def run(self):
         """Main application loop"""
@@ -237,13 +256,15 @@ def main():
     """Entry point"""
     # Check if waking from deep sleep
     print("\n" + "=" * 50)
+    woke_from_sleep = False
     if alarm.wake_alarm:
         print("Woke from deep sleep!")
+        woke_from_sleep = True
     else:
         print("Fresh start (not from deep sleep)")
 
     try:
-        tracker = DogFeedingTracker()
+        tracker = DogFeedingTracker(woke_from_sleep=woke_from_sleep)
         tracker.run()
     except Exception as e:
         print(f"Fatal error: {e}")

@@ -10,11 +10,19 @@ CIRCUITPY_WIFI_HOSTNAME = "magtag-dogtracker"
 # Set timezone for automatic time sync (optional)
 CIRCUITPY_TIMEZONE = "America/New_York"
 
+# Timezone offset from UTC in hours
+# Examples: -5 for EST, -4 for EDT, 0 for UTC, +1 for CET
+# This is used for converting between UTC (MQTT messages) and local time (display)
+TIMEZONE_OFFSET = "-5"
+
 # MQTT Configuration
 MQTT_BROKER = "192.168.1.85"
 MQTT_PORT = "1883"
 MQTT_USERNAME = "mqtt_username"
 MQTT_PASSWORD = "mqtt_password"
+
+# MQTT payload for clearing fed status (empty string by default)
+# MQTT_NOT_FED_PAYLOAD = ""
 
 # API Endpoints
 DOG_FEED_API = "http://192.168.1.85:1880/dog-feed-status"
@@ -23,4 +31,3 @@ DOG_FEED_API = "http://192.168.1.85:1880/dog-feed-status"
 # Allows file access over web browser at http://[device-ip]
 # CIRCUITPY_WEB_API_PASSWORD = "your_api_password"
 # CIRCUITPY_WEB_API_PORT = "80"
-
